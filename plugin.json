@@ -3,6 +3,21 @@
   "displayName": "GitHub Worker Board",
   "description": "Live auxiliary-pane sidecar status board for agent-ready GitHub issue workflows.",
   "version": "1.0.0",
+  "author": {
+    "name": "rrivera",
+    "email": "rrl@live.com.mx",
+    "url": "https://github.com/rrivera"
+  },
+  "homepage": "https://github.com/rrivera/agy-github-worker-board",
+  "repository": "https://github.com/rrivera/agy-github-worker-board",
+  "license": "MIT",
+  "keywords": [
+    "github",
+    "sidecar",
+    "kanban",
+    "dashboard",
+    "board"
+  ],
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Show the current status of agent-ready GitHub issues in the sidecar board"
