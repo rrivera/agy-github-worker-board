@@ -1,0 +1,17 @@
+{
+  "name": "agy-github-worker-board",
+  "version": "1.0.0",
+  "description": "Live auxiliary-pane sidecar status board for agent-ready GitHub issue workflows in Antigravity.",
+  "scripts": {
+    "test": "npm test --prefix sidecars/github-worker-board"
+  },
+  "keywords": [
+    "antigravity",
+    "plugin",
+    "sidecar",
+    "github",
+    "kanban"
+  ],
+  "author": "rrivera",
+  "license": "MIT"
+}
