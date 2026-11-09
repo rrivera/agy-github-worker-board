@@ -41,6 +41,7 @@ agy-github-worker-board/
 ├── plugin.json                              # Antigravity plugin manifest
 ├── package.json                             # Root test runner & project definition
 ├── README.md                                # Documentation
+├── LICENSE                                  # MIT license definition
 ├── assets/
 │   ├── logo.svg                             # Plugin icon (vector)
 │   └── logo.png                             # Plugin icon (rendered PNG)
