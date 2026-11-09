@@ -267,6 +267,70 @@ export function classifyIssueAction(status, timeline = []) {
 }
 
 /**
+ * Evaluates GitHub Actions check runs and commit status contexts to determine
+ * overall CI / check status: 'passing', 'failing', 'running', 'pending', or null.
+ *
+ * @param {Array<object>} [statusCheckRollup=[]] - Rollup of check runs and status contexts.
+ * @returns {'passing' | 'failing' | 'running' | 'pending' | null}
+ */
+export function computeChecksStatus(statusCheckRollup) {
+  if (!Array.isArray(statusCheckRollup) || statusCheckRollup.length === 0) {
+    return null;
+  }
+
+  let hasPassing = false;
+  let hasRunning = false;
+  let hasPending = false;
+  let validChecksCount = 0;
+
+  for (const check of statusCheckRollup) {
+    if (!check || typeof check !== 'object') continue;
+
+    const status = (check.status || '').toUpperCase();
+    const conclusion = (check.conclusion || '').toUpperCase();
+    const state = (check.state || '').toUpperCase();
+
+    // 1. Any hard failure or error fails immediately
+    const isFailingConclusion = ['FAILURE', 'TIMED_OUT', 'ACTION_REQUIRED', 'CANCELLED', 'STARTUP_FAILURE'].includes(conclusion);
+    const isFailingState = ['FAILURE', 'ERROR'].includes(state);
+    if (isFailingConclusion || isFailingState) {
+      return 'failing';
+    }
+
+    // 2. Running / In progress checks
+    const isRunning = status === 'IN_PROGRESS';
+    if (isRunning) {
+      hasRunning = true;
+      validChecksCount++;
+      continue;
+    }
+
+    // 3. Queued or Pending checks
+    const isPending = ['QUEUED', 'PENDING', 'WAITING', 'REQUESTED'].includes(status) || state === 'PENDING';
+    if (isPending) {
+      hasPending = true;
+      validChecksCount++;
+      continue;
+    }
+
+    // 4. Completed success / neutral / skipped checks
+    const isSuccessConclusion = ['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(conclusion);
+    const isSuccessState = state === 'SUCCESS';
+    if (isSuccessConclusion || isSuccessState) {
+      hasPassing = true;
+      validChecksCount++;
+      continue;
+    }
+  }
+
+  if (hasRunning) return 'running';
+  if (hasPending) return 'pending';
+  if (hasPassing && validChecksCount > 0) return 'passing';
+
+  return null;
+}
+
+/**
  * Normalizes a raw GitHub issue and its associated PRs into a standardized board card item.
  *
  * @param {object} issue - Raw GitHub issue object.
@@ -283,10 +347,15 @@ export function formatIssueItem(issue, issuePRs = [], inlineComments = []) {
   const timeline = buildIssueTimeline(issue, primaryPR, inlineComments);
   const { action, actionable } = classifyIssueAction(status, timeline);
 
+  const authorLogin = issue?.author?.login || (typeof issue?.author === 'string' ? issue.author : '');
+  const milestoneTitle = issue?.milestone?.title || (typeof issue?.milestone === 'string' ? issue.milestone : '');
+
   return {
     id: `issue-${issue.number}`,
     number: issue.number,
     title: issue.title || '',
+    author: authorLogin,
+    milestone: milestoneTitle,
     url: issue.url || '',
     state: isClosed ? 'CLOSED' : 'OPEN',
     status,
@@ -300,6 +369,7 @@ export function formatIssueItem(issue, issuePRs = [], inlineComments = []) {
       url: pr.url || '',
       state: pr.state || 'OPEN',
       isDraft: Boolean(pr.isDraft),
+      checksStatus: computeChecksStatus(pr.statusCheckRollup),
     })),
   };
 }
@@ -340,7 +410,7 @@ export async function fetchIssuesData(workspaceUri, userOverrideRepo, execFn = e
       '--limit',
       '100',
       '--json',
-      'number,title,url,body,labels,createdAt,updatedAt,comments',
+      'number,title,url,body,labels,createdAt,updatedAt,comments,author,milestone',
     ], { maxBuffer: 15 * 1024 * 1024 }).then(({ stdout }) => JSON.parse(stdout || '[]')),
 
     execFn('gh', [
@@ -352,7 +422,7 @@ export async function fetchIssuesData(workspaceUri, userOverrideRepo, execFn = e
       '--limit',
       '60',
       '--json',
-      'number,title,url,state,headRefName,isDraft,createdAt,comments,reviews',
+      'number,title,url,state,headRefName,isDraft,createdAt,comments,reviews,statusCheckRollup',
     ], { maxBuffer: 15 * 1024 * 1024 }).then(({ stdout }) => JSON.parse(stdout || '[]')).catch(() => []),
 
     execFn('gh', [

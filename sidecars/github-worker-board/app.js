@@ -8,6 +8,10 @@ export const boardState = {
   activeWorkspaceUri: null,
   userOverrideRepo: '',
   filterQuery: '',
+  selectedLabels: [],
+  selectedAuthors: [],
+  selectedMilestones: [],
+  countdownSeconds: 30,
   isRefreshing: false,
 };
 
@@ -50,28 +54,100 @@ export function capitalize(s) {
 }
 
 /**
- * Filters board items against search query across issue numbers, titles,
- * action states, and linked PR numbers/titles.
+ * Extracts unique, sorted lists of available labels, authors, and milestones
+ * from an array of board items.
+ *
+ * @param {Array<object>} items - Board items.
+ * @returns {{ labels: string[], authors: string[], milestones: string[] }}
+ */
+export function extractFilterOptions(items) {
+  const labelsSet = new Set();
+  const authorsSet = new Set();
+  const milestonesSet = new Set();
+
+  if (Array.isArray(items)) {
+    for (const item of items) {
+      if (!item) continue;
+
+      if (Array.isArray(item.labels)) {
+        for (const l of item.labels) {
+          const name = typeof l === 'string' ? l.trim() : (l?.name || '').trim();
+          if (name) labelsSet.add(name);
+        }
+      }
+
+      const author = typeof item.author === 'string' ? item.author.trim() : (item.author?.login || '').trim();
+      if (author) authorsSet.add(author);
+
+      const milestone = typeof item.milestone === 'string' ? item.milestone.trim() : (item.milestone?.title || '').trim();
+      if (milestone) milestonesSet.add(milestone);
+    }
+  }
+
+  return {
+    labels: Array.from(labelsSet).sort((a, b) => a.localeCompare(b)),
+    authors: Array.from(authorsSet).sort((a, b) => a.localeCompare(b)),
+    milestones: Array.from(milestonesSet).sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+/**
+ * Filters board items against search query and active filter chips (labels, authors, milestones).
  *
  * @param {Array<object>} items - Array of board items.
- * @param {string} query - Search query.
+ * @param {string} [query=''] - Search query.
+ * @param {object} [activeFilters={}] - Active filters map.
+ * @param {Array<string>} [activeFilters.labels=[]] - Selected label filters.
+ * @param {Array<string>} [activeFilters.authors=[]] - Selected author filters.
+ * @param {Array<string>} [activeFilters.milestones=[]] - Selected milestone filters.
  * @returns {Array<object>} Filtered items array.
  */
-export function filterItems(items, query) {
+export function filterItems(items, query = '', activeFilters = {}) {
   if (!Array.isArray(items)) return [];
   const q = (query || '').trim().toLowerCase();
-  if (!q) return items;
+  const selectedLabels = Array.isArray(activeFilters?.labels) ? activeFilters.labels : [];
+  const selectedAuthors = Array.isArray(activeFilters?.authors) ? activeFilters.authors : [];
+  const selectedMilestones = Array.isArray(activeFilters?.milestones) ? activeFilters.milestones : [];
 
   return items.filter((item) => {
     if (!item) return false;
-    const matchNum = item.number != null && String(item.number).includes(q);
-    const matchTitle = item.title && item.title.toLowerCase().includes(q);
-    const matchAction = item.action && item.action.toLowerCase().includes(q);
-    const matchPr = Array.isArray(item.pullRequests) && item.pullRequests.some((pr) =>
-      (pr?.number != null && String(pr.number).includes(q)) ||
-      (pr?.title && pr.title.toLowerCase().includes(q))
-    );
-    return Boolean(matchNum || matchTitle || matchAction || matchPr);
+
+    // 1. Text search query match
+    if (q) {
+      const matchNum = item.number != null && String(item.number).includes(q);
+      const matchTitle = item.title && item.title.toLowerCase().includes(q);
+      const matchAction = item.action && item.action.toLowerCase().includes(q);
+      const matchPr = Array.isArray(item.pullRequests) && item.pullRequests.some((pr) =>
+        (pr?.number != null && String(pr.number).includes(q)) ||
+        (pr?.title && pr.title.toLowerCase().includes(q))
+      );
+      if (!matchNum && !matchTitle && !matchAction && !matchPr) {
+        return false;
+      }
+    }
+
+    // 2. Active label filters match (item must have all selected labels)
+    if (selectedLabels.length > 0) {
+      const itemLabels = Array.isArray(item.labels)
+        ? item.labels.map((l) => (typeof l === 'string' ? l : l?.name || ''))
+        : [];
+      const hasAllLabels = selectedLabels.every((sel) => itemLabels.includes(sel));
+      if (!hasAllLabels) return false;
+    }
+
+    // 3. Active author filters match (item must match one of selected authors)
+    if (selectedAuthors.length > 0) {
+      const itemAuthor = typeof item.author === 'string' ? item.author : (item.author?.login || '');
+      if (!selectedAuthors.includes(itemAuthor)) return false;
+    }
+
+    // 4. Active milestone filters match (item must match one of selected milestones)
+    if (selectedMilestones.length > 0) {
+      const itemMilestone = typeof item.milestone === 'string' ? item.milestone : (item.milestone?.title || '');
+      if (!selectedMilestones.includes(itemMilestone)) return false;
+    }
+
+    return true;
   });
 }
 
@@ -141,20 +217,25 @@ export async function resolveWorkspaceUri(timeoutMs = 2000) {
 }
 
 /**
- * Creates DOM node for an issue card with direct links and action badges.
- * Accepts an injectable document context for unit testability in non-browser environments.
+ * Creates DOM node for an issue card with direct links, action badges, and Run Worker action.
+ * Accepts an injectable document context and clipboard API for unit testability in non-browser environments.
  *
  * @param {object} item - Issue card item data.
  * @param {Document|object} [doc=(typeof document !== 'undefined' ? document : null)] - DOM document context.
+ * @param {object} [clipboardApi=(typeof navigator !== 'undefined' ? navigator.clipboard : null)] - Clipboard interface.
  * @returns {HTMLElement|null}
  */
-export function createCardElement(item, doc = (typeof document !== 'undefined' ? document : null)) {
+export function createCardElement(
+  item,
+  doc = (typeof document !== 'undefined' ? document : null),
+  clipboardApi = (typeof navigator !== 'undefined' ? navigator.clipboard : null)
+) {
   if (!doc || !doc.createElement || !item) return null;
 
   const card = doc.createElement('div');
   card.className = 'card';
 
-  // Card Header (Direct Issue Link + Action Badge)
+  // Card Header (Direct Issue Link + Action Badge + Run Worker Action)
   const cardTop = doc.createElement('div');
   cardTop.className = 'card-top';
 
@@ -177,6 +258,42 @@ export function createCardElement(item, doc = (typeof document !== 'undefined' ?
     badgesContainer.appendChild(actionBadge);
   }
 
+  // "Run Worker on Issue" action button
+  if (item.number) {
+    const runBtn = doc.createElement('button');
+    runBtn.className = 'run-worker-btn';
+    runBtn.setAttribute('data-issue-number', String(item.number));
+    runBtn.setAttribute('title', `Run worker on issue #${item.number}`);
+    runBtn.innerHTML = '<span>⚡ Run Worker</span>';
+
+    runBtn.addEventListener('click', async (e) => {
+      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      const cmd = `/github-worker #${item.number}`;
+      try {
+        if (clipboardApi && typeof clipboardApi.writeText === 'function') {
+          await clipboardApi.writeText(cmd);
+        } else if (typeof navigator !== 'undefined' && navigator?.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(cmd);
+        }
+        if (runBtn.classList && typeof runBtn.classList.add === 'function') {
+          runBtn.classList.add('copied');
+        }
+        runBtn.innerHTML = '<span>✓ Copied!</span>';
+        setTimeout(() => {
+          if (runBtn.classList && typeof runBtn.classList.remove === 'function') {
+            runBtn.classList.remove('copied');
+          }
+          runBtn.innerHTML = '<span>⚡ Run Worker</span>';
+        }, 2000);
+      } catch (err) {
+        console.warn('Could not copy command to clipboard:', err);
+      }
+    });
+
+    badgesContainer.appendChild(runBtn);
+  }
+
   cardTop.appendChild(idLink);
   cardTop.appendChild(badgesContainer);
   card.appendChild(cardTop);
@@ -193,7 +310,7 @@ export function createCardElement(item, doc = (typeof document !== 'undefined' ?
   cardTitle.appendChild(titleLink);
   card.appendChild(cardTitle);
 
-  // Associated PRs with direct links
+  // Associated PRs with direct links and live CI check badges
   if (Array.isArray(item.pullRequests) && item.pullRequests.length > 0) {
     const prsContainer = doc.createElement('div');
     prsContainer.className = 'card-prs';
@@ -209,7 +326,18 @@ export function createCardElement(item, doc = (typeof document !== 'undefined' ?
       prPill.title = pr.title || `Pull Request #${pr.number}`;
 
       const stateLabel = pr.isDraft ? 'Draft' : capitalize(prState);
-      prPill.innerHTML = `<span>⑂ #${pr.number}</span> <span style="font-size: 10px; opacity: 0.85;">(${escapeHtml(stateLabel)})</span>`;
+      let checkBadgeHtml = '';
+      if (pr.checksStatus) {
+        const symbolMap = {
+          passing: '✓',
+          failing: '✕',
+          running: '●',
+          pending: '○',
+        };
+        const symbol = symbolMap[pr.checksStatus] || '●';
+        checkBadgeHtml = ` <span class="check-badge ${escapeHtml(pr.checksStatus)}" title="CI: ${escapeHtml(pr.checksStatus)}">${symbol}</span>`;
+      }
+      prPill.innerHTML = `<span>⑂ #${pr.number}</span> <span style="font-size: 10px; opacity: 0.85;">(${escapeHtml(stateLabel)})</span>${checkBadgeHtml}`;
       prsContainer.appendChild(prPill);
     }
 
@@ -217,6 +345,167 @@ export function createCardElement(item, doc = (typeof document !== 'undefined' ?
   }
 
   return card;
+}
+
+export const POLL_INTERVAL_SECONDS = 30;
+
+/**
+ * Updates the countdown timer display in the DOM.
+ *
+ * @param {Document|object} [doc=(typeof document !== 'undefined' ? document : null)] - DOM document context.
+ */
+export function updateCountdownDisplay(doc = (typeof document !== 'undefined' ? document : null)) {
+  if (!doc || typeof doc.getElementById !== 'function') return;
+  const el = doc.getElementById('countdown-timer');
+  if (el) {
+    el.textContent = `${boardState.countdownSeconds}s`;
+  }
+}
+
+/**
+ * Resets the countdown timer to the poll interval and updates the display.
+ *
+ * @param {Document|object} [doc=(typeof document !== 'undefined' ? document : null)] - DOM document context.
+ */
+export function resetCountdown(doc = (typeof document !== 'undefined' ? document : null)) {
+  boardState.countdownSeconds = POLL_INTERVAL_SECONDS;
+  updateCountdownDisplay(doc);
+}
+
+/**
+ * Decrements the countdown timer by 1 second. Triggers onExpire and resets when it reaches 0.
+ *
+ * @param {Function} [onExpire=loadBoard] - Callback invoked when timer hits 0.
+ * @param {Document|object} [doc=(typeof document !== 'undefined' ? document : null)] - DOM document context.
+ */
+export function tickCountdown(onExpire = loadBoard, doc = (typeof document !== 'undefined' ? document : null)) {
+  boardState.countdownSeconds -= 1;
+  if (boardState.countdownSeconds <= 0) {
+    resetCountdown(doc);
+    if (typeof onExpire === 'function') {
+      onExpire();
+    }
+  } else {
+    updateCountdownDisplay(doc);
+  }
+}
+
+/**
+ * Toggles an active filter chip for labels, authors, or milestones and re-renders the board.
+ *
+ * @param {'labels' | 'authors' | 'milestones'} type - Filter category.
+ * @param {string} value - Filter value to toggle.
+ */
+export function toggleFilter(type, value) {
+  if (!['labels', 'authors', 'milestones'].includes(type)) return;
+  const prop = `selected${capitalize(type)}`;
+  const list = boardState[prop] || [];
+  const idx = list.indexOf(value);
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  } else {
+    list.push(value);
+  }
+  renderBoard();
+}
+
+/**
+ * Clears all active filter selections and re-renders the board.
+ */
+export function clearFilters() {
+  boardState.selectedLabels = [];
+  boardState.selectedAuthors = [];
+  boardState.selectedMilestones = [];
+  renderBoard();
+}
+
+/**
+ * Renders interactive filter chips into the specified DOM container.
+ *
+ * @param {HTMLElement|object} container - DOM container element.
+ * @param {object} options - Available filter options { labels, authors, milestones }.
+ * @param {object} [activeFilters={}] - Active filters map.
+ * @param {Function} [onToggle=toggleFilter] - Callback when chip is toggled.
+ * @param {Document|object} [doc=(typeof document !== 'undefined' ? document : null)] - DOM document context.
+ */
+export function renderFilterChips(
+  container,
+  options,
+  activeFilters = {},
+  onToggle = toggleFilter,
+  doc = (typeof document !== 'undefined' ? document : null)
+) {
+  if (!container || !doc || typeof doc.createElement !== 'function') return;
+  container.innerHTML = '';
+
+  const { labels = [], authors = [], milestones = [] } = options || {};
+  const selectedLabels = Array.isArray(activeFilters.labels) ? activeFilters.labels : [];
+  const selectedAuthors = Array.isArray(activeFilters.authors) ? activeFilters.authors : [];
+  const selectedMilestones = Array.isArray(activeFilters.milestones) ? activeFilters.milestones : [];
+
+  const hasActive = selectedLabels.length > 0 || selectedAuthors.length > 0 || selectedMilestones.length > 0;
+  if (labels.length === 0 && authors.length === 0 && milestones.length === 0) {
+    if (container.style) container.style.display = 'none';
+    return;
+  }
+  if (container.style) container.style.display = 'flex';
+
+  // Render Label Chips
+  for (const label of labels) {
+    const chip = doc.createElement('button');
+    const isActive = selectedLabels.includes(label);
+    chip.className = `filter-chip label-chip ${isActive ? 'active' : ''}`;
+    chip.setAttribute('type', 'button');
+    chip.setAttribute('data-filter-type', 'labels');
+    chip.setAttribute('data-filter-value', label);
+    chip.innerHTML = `<span class="chip-label">${escapeHtml(label)}</span>`;
+    chip.addEventListener('click', () => {
+      if (typeof onToggle === 'function') onToggle('labels', label);
+    });
+    container.appendChild(chip);
+  }
+
+  // Render Author Chips
+  for (const author of authors) {
+    const chip = doc.createElement('button');
+    const isActive = selectedAuthors.includes(author);
+    chip.className = `filter-chip author-chip ${isActive ? 'active' : ''}`;
+    chip.setAttribute('type', 'button');
+    chip.setAttribute('data-filter-type', 'authors');
+    chip.setAttribute('data-filter-value', author);
+    chip.innerHTML = `<span class="chip-label">@${escapeHtml(author)}</span>`;
+    chip.addEventListener('click', () => {
+      if (typeof onToggle === 'function') onToggle('authors', author);
+    });
+    container.appendChild(chip);
+  }
+
+  // Render Milestone Chips
+  for (const milestone of milestones) {
+    const chip = doc.createElement('button');
+    const isActive = selectedMilestones.includes(milestone);
+    chip.className = `filter-chip milestone-chip ${isActive ? 'active' : ''}`;
+    chip.setAttribute('type', 'button');
+    chip.setAttribute('data-filter-type', 'milestones');
+    chip.setAttribute('data-filter-value', milestone);
+    chip.innerHTML = `<span class="chip-label">🏁 ${escapeHtml(milestone)}</span>`;
+    chip.addEventListener('click', () => {
+      if (typeof onToggle === 'function') onToggle('milestones', milestone);
+    });
+    container.appendChild(chip);
+  }
+
+  // Clear filters button if any active
+  if (hasActive) {
+    const clearBtn = doc.createElement('button');
+    clearBtn.className = 'filter-chip clear-chip';
+    clearBtn.setAttribute('type', 'button');
+    clearBtn.textContent = 'Clear filters';
+    clearBtn.addEventListener('click', () => {
+      clearFilters();
+    });
+    container.appendChild(clearBtn);
+  }
 }
 
 /**
@@ -279,6 +568,7 @@ export async function loadBoard() {
     boardState.items = data.items || [];
     boardState.lastUpdated = data.lastUpdated;
 
+    resetCountdown();
     renderBoard();
 
     if (boardState.lastUpdated && statusBar) {
@@ -319,8 +609,20 @@ export function renderBoard() {
     repoBadgeEl.style.display = 'none';
   }
 
-  const filteredItems = filterItems(boardState.items, boardState.filterQuery);
+  const activeFilters = {
+    labels: boardState.selectedLabels,
+    authors: boardState.selectedAuthors,
+    milestones: boardState.selectedMilestones,
+  };
+  const filteredItems = filterItems(boardState.items, boardState.filterQuery, activeFilters);
   const itemsByStatus = groupItemsByStatus(boardState.columns, filteredItems);
+
+  // Render filter chips
+  const chipsContainer = document.getElementById('filter-chips-container');
+  if (chipsContainer) {
+    const options = extractFilterOptions(boardState.items);
+    renderFilterChips(chipsContainer, options, activeFilters, toggleFilter, document);
+  }
 
   cardsContainer.innerHTML = '';
 
@@ -384,8 +686,13 @@ function initApp() {
   const repoInput = document.getElementById('repo-input');
   const promptBanner = document.getElementById('repo-prompt-banner');
 
-  refreshBtn?.addEventListener('click', () => loadBoard());
-  retryBtn?.addEventListener('click', () => loadBoard());
+  const handleManualRefresh = () => {
+    resetCountdown();
+    loadBoard();
+  };
+
+  refreshBtn?.addEventListener('click', handleManualRefresh);
+  retryBtn?.addEventListener('click', handleManualRefresh);
 
   changeRepoBtn?.addEventListener('click', () => {
     promptBanner.style.display = promptBanner.style.display === 'none' ? 'block' : 'none';
@@ -422,10 +729,10 @@ function initApp() {
   // Initial load
   loadBoard();
 
-  // Polling every 30 seconds
+  // Countdown timer ticking every second, auto-refreshing every 30s
   setInterval(() => {
-    loadBoard();
-  }, 30000);
+    tickCountdown(loadBoard);
+  }, 1000);
 }
 
 // Event Listeners setup for browser execution

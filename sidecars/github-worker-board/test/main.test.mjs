@@ -9,6 +9,7 @@ import {
   classifyIssueAction,
   formatIssueItem,
   fetchIssuesData,
+  computeChecksStatus,
 } from '../main.mjs';
 
 describe('COLUMNS', () => {
@@ -303,6 +304,8 @@ describe('formatIssueItem', () => {
       title: 'Fix bug',
       url: 'https://github.com/org/repo/issues/1',
       body: 'Bug report',
+      author: { login: 'octocat' },
+      milestone: { title: 'v1.0' },
       labels: [{ name: 'agent-ready' }, { name: 'status:in-progress' }],
       createdAt: '2026-11-01T10:00:00Z',
       updatedAt: '2026-11-01T11:00:00Z',
@@ -315,6 +318,9 @@ describe('formatIssueItem', () => {
         url: 'https://github.com/org/repo/pull/10',
         state: 'OPEN',
         isDraft: false,
+        statusCheckRollup: [
+          { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
       },
     ];
 
@@ -322,12 +328,15 @@ describe('formatIssueItem', () => {
     assert.equal(item.id, 'issue-1');
     assert.equal(item.number, 1);
     assert.equal(item.title, 'Fix bug');
+    assert.equal(item.author, 'octocat');
+    assert.equal(item.milestone, 'v1.0');
     assert.equal(item.status, 'In Progress');
     assert.equal(item.action, 'NEEDS_PLAN');
     assert.equal(item.actionable, true);
     assert.deepEqual(item.labels, ['agent-ready', 'status:in-progress']);
     assert.equal(item.pullRequests.length, 1);
     assert.equal(item.pullRequests[0].number, 10);
+    assert.equal(item.pullRequests[0].checksStatus, 'passing');
   });
 
   it('marks issue actionable with USER_REPLIED when human leaves an inline review comment after agent event', () => {
@@ -483,5 +492,123 @@ describe('fetchIssuesData', () => {
     assert.equal(res.items[0].number, 1);
     assert.equal(res.items[0].title, 'Active Issue');
     assert.equal(res.items.some((i) => i.status === 'Done'), false);
+  });
+
+  it('queries author, milestone, and statusCheckRollup in gh commands', async () => {
+    let issueArgs = [];
+    let prArgs = [];
+
+    const mockExec = async (cmd, args) => {
+      if (args.includes('issue')) issueArgs = args;
+      if (args.includes('pr')) prArgs = args;
+      return { stdout: '[]' };
+    };
+
+    await fetchIssuesData('', 'owner/repo', mockExec);
+
+    // Verify gh issue list includes author and milestone in --json
+    const issueJsonIdx = issueArgs.indexOf('--json');
+    assert.ok(issueJsonIdx !== -1, 'gh issue list must include --json flag');
+    const issueJsonFields = issueArgs[issueJsonIdx + 1];
+    assert.match(issueJsonFields, /\bauthor\b/);
+    assert.match(issueJsonFields, /\bmilestone\b/);
+
+    // Verify gh pr list includes statusCheckRollup in --json
+    const prJsonIdx = prArgs.indexOf('--json');
+    assert.ok(prJsonIdx !== -1, 'gh pr list must include --json flag');
+    const prJsonFields = prArgs[prJsonIdx + 1];
+    assert.match(prJsonFields, /\bstatusCheckRollup\b/);
+  });
+});
+
+describe('computeChecksStatus', () => {
+  it('returns null for empty, null, or undefined rollups', () => {
+    assert.equal(computeChecksStatus([]), null);
+    assert.equal(computeChecksStatus(null), null);
+    assert.equal(computeChecksStatus(undefined), null);
+  });
+
+  it('returns passing when all check runs succeed', () => {
+    const rollup = [
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SKIPPED' },
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'NEUTRAL' },
+    ];
+    assert.equal(computeChecksStatus(rollup), 'passing');
+  });
+
+  it('returns failing when any check run has failed, timed out, or requires action', () => {
+    assert.equal(computeChecksStatus([
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' },
+    ]), 'failing');
+
+    assert.equal(computeChecksStatus([
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'TIMED_OUT' },
+    ]), 'failing');
+
+    assert.equal(computeChecksStatus([
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'ACTION_REQUIRED' },
+    ]), 'failing');
+  });
+
+  it('evaluates StatusContext commit statuses accurately', () => {
+    assert.equal(computeChecksStatus([
+      { __typename: 'StatusContext', state: 'SUCCESS' },
+    ]), 'passing');
+
+    assert.equal(computeChecksStatus([
+      { __typename: 'StatusContext', state: 'FAILURE' },
+    ]), 'failing');
+
+    assert.equal(computeChecksStatus([
+      { __typename: 'StatusContext', state: 'ERROR' },
+    ]), 'failing');
+
+    assert.equal(computeChecksStatus([
+      { __typename: 'StatusContext', state: 'PENDING' },
+    ]), 'pending');
+  });
+
+  it('returns running when check runs are in progress', () => {
+    const rollup = [
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', status: 'IN_PROGRESS' },
+    ];
+    assert.equal(computeChecksStatus(rollup), 'running');
+  });
+
+  it('returns pending when check runs are queued or pending', () => {
+    const rollup = [
+      { __typename: 'CheckRun', status: 'QUEUED' },
+    ];
+    assert.equal(computeChecksStatus(rollup), 'pending');
+
+    const rollupPending = [
+      { __typename: 'CheckRun', status: 'PENDING' },
+    ];
+    assert.equal(computeChecksStatus(rollupPending), 'pending');
+  });
+
+  it('prioritizes failure over running and pending', () => {
+    const rollup = [
+      { __typename: 'CheckRun', status: 'IN_PROGRESS' },
+      { __typename: 'CheckRun', status: 'QUEUED' },
+      { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' },
+    ];
+    assert.equal(computeChecksStatus(rollup), 'failing');
+  });
+
+  it('prioritizes running over pending', () => {
+    const rollup = [
+      { __typename: 'CheckRun', status: 'QUEUED' },
+      { __typename: 'CheckRun', status: 'IN_PROGRESS' },
+    ];
+    assert.equal(computeChecksStatus(rollup), 'running');
+  });
+
+  it('handles malformed or unknown items defensively without throwing', () => {
+    const rollup = [null, undefined, {}, { status: null }];
+    assert.equal(computeChecksStatus(rollup), null);
   });
 });
