@@ -2,7 +2,7 @@
   "name": "agy-github-worker-board",
   "displayName": "GitHub Worker Board",
   "description": "Live auxiliary-pane sidecar status board for agent-ready GitHub issue workflows.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": {
     "name": "rrivera",
     "email": "rrl@live.com.mx",

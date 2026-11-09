@@ -62,11 +62,11 @@ agy-github-worker-board/
 
 ## Installation in Antigravity
 
-Clone into your Antigravity global plugins directory:
+Install directly from GitHub via the Antigravity CLI:
 
 ```bash
-mkdir -p ~/.gemini/config/plugins
-git clone https://github.com/rrivera/agy-github-worker-board ~/.gemini/config/plugins/agy-github-worker-board
+# Install the auxiliary sidecar board
+agy plugin install https://github.com/rrivera/agy-github-worker-board
 ```
 
 Restart or reload Antigravity. The board will appear in the auxiliary side pane, automatically detecting the repository of your active workspace.

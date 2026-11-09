@@ -1,6 +1,6 @@
 {
   "name": "agy-github-worker-board",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Live auxiliary-pane sidecar status board for agent-ready GitHub issue workflows in Antigravity.",
   "scripts": {
     "test": "npm test --prefix sidecars/github-worker-board"
